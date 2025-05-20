@@ -12,35 +12,46 @@ from nltk.stem.isri import ISRIStemmer
 import nltk
 import os
 
+st.set_page_config(page_title="منصة طَمّني", layout="centered")
+
+# Download NLTK
 nltk.download('stopwords')
 
-# ----------------- MongoDB Connection -----------------
+# MongoDB Connection
 uri = "mongodb+srv://tammeni25:mentalhealth255@tamminicluster.nunk6nw.mongodb.net/?retryWrites=true&w=majority&authSource=admin"
 client = MongoClient(uri)
 db = client["tammini_db"]
 users_col = db["users"]
 responses_col = db["responses"]
 
-# -------------- Model ----------------
-svm_dep = joblib.load("SVM_DEPRESSION_FINAL.pkl")
-svm_anx = joblib.load("SVM_ANXIETY_FINAL.pkl")
+#Donwload M @st.cache_resource ---
+@st.cache_resource
+def load_models():
+    svm_dep = joblib.load("SVM_DEPRESSION_FINAL.pkl")
+    svm_anx = joblib.load("SVM_ANXIETY_FINAL.pkl")
+    return svm_dep, svm_anx
 
-# SBERT Model
-model_path = os.path.join(os.getcwd(), 'sbert_model5')
+@st.cache_resource
+def load_sbert_model():
+    model_path = os.path.join(os.getcwd(), 'sbert_model5')
+    if not os.path.exists(os.path.join(model_path, 'pytorch_model.bin')):
+        print(f"Downloading model to {model_path}")
+        model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", cache_folder=model_path)
+    else:
+        print(f"Loading model from {model_path}")
+        model = SentenceTransformer(model_path)
 
-if not os.path.exists(os.path.join(model_path, 'pytorch_model.bin')):
-    print(f"Downloading model to {model_path}")
-    Sbert = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2", cache_folder=model_path)
-else:
-    print(f"Loading model from {model_path}")
-    Sbert = SentenceTransformer(model_path)
+    for module in model._modules.values():
+        for param in module.parameters():
+            param.requires_grad = False
+    model._target_device = torch.device("cpu")
+    return model
 
-for module in Sbert._modules.values():
-    for param in module.parameters():
-        param.requires_grad = False
-Sbert._target_device = torch.device("cpu")
+# --- Download M one time ---
+svm_dep, svm_anx = load_models()
+Sbert = load_sbert_model()
 
-# Text Preprocessing
+# --- Clean text ---
 def clean_text(text):
     cleaned = re.sub(r"[\'\"\d,;.،؛.؟]", ' ', text)
     cleaned = re.sub(r"\s{2,}", ' ', cleaned)
@@ -60,6 +71,7 @@ def clean_text(text):
     cleaned = cleaned.replace('ة','ه').replace('ى','ي').replace('ؤ','و').replace('ئ','ي')
     return cleaned.strip()
 
+# ---Encrypt text by SBERT ---
 def encode_Sbert(questions, answers):
     questions = [clean_text(q) for q in questions]
     answers = [clean_text(a) for a in answers]
@@ -68,9 +80,11 @@ def encode_Sbert(questions, answers):
     similarities = cos_sim(q_emb, a_emb).diagonal().tolist()
     return pd.DataFrame([similarities], columns=[f"Q{i+1}_sim" for i in range(len(similarities))])
 
+# ---  analysis ---
 def get_score(model, X_test):
     return model.predict_proba(X_test)
 
+# --- analysis Answr ---
 def analyze_user_responses(answers, questions):
     questions_dep = questions[:3]
     questions_anx = questions[2:6]
@@ -83,10 +97,7 @@ def analyze_user_responses(answers, questions):
         "Anxiety": int(anx_score[0] * 100)
     }
 
-# ----------------- Page Setup -----------------
-st.set_page_config(page_title="منصة طَمّني", layout="centered")
-
-# ----------------- Arabic Styling -----------------
+# --- gui Desi ---
 st.markdown("""
     <style>
     @import url('https://fonts.googleapis.com/css2?family=Cairo :wght@400;700&display=swap');
@@ -137,11 +148,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# ----------------- Static UI -----------------
+# --- main menu ---
 st.markdown('<div class="header-box"><div class="title-inside">منصة طَمّني</div></div>', unsafe_allow_html=True)
 st.markdown('<div class="note-box">هذه المنصة لا تُغني عن تشخيص الطبيب المختص، بل تهدف إلى دعم قراره بشكل مبدئي.</div>', unsafe_allow_html=True)
 
-# ----------------- Login/Register Interface -----------------
+# ---login ---
 if "page" not in st.session_state:
     st.session_state.page = "login"
 
@@ -168,7 +179,7 @@ if st.session_state.page == "login":
                 users_col.insert_one({"username": new_username, "password": new_password})
                 st.success("تم إنشاء الحساب بنجاح. يمكنك الآن تسجيل الدخول.")
 
-# ----------------- Questionnaire -----------------
+# --- Question ---
 def questionnaire():
     st.markdown('<div class="header-box">', unsafe_allow_html=True)
     st.markdown('<div class="title-inside">التقييم النفسي</div>', unsafe_allow_html=True)
@@ -190,7 +201,6 @@ def questionnaire():
         answers.append(st.text_area(f"{q}", key=f"q{i}"))
     if st.button("إرسال"):
         if all(ans.strip() for ans in answers):
-            # Save raw responses to DB
             responses_col.insert_one({
                 "username": st.session_state.get("user", "مستخدم مجهول"),
                 "gender": gender,
@@ -199,11 +209,7 @@ def questionnaire():
                 "result": "قيد المعالجة",
                 "timestamp": datetime.now()
             })
-            # Convert answers to DataFrame for AI pipeline
-            df_user = pd.DataFrame([answers], columns=[f"q{i+1}" for i in range(len(answers))])
-            # Run AI analysis
             result = analyze_user_responses(answers, questions)
-            # Update the most recent response entry with AI scores
             latest_doc = responses_col.find_one(
                 {"username": st.session_state.get("user")},
                 sort=[("timestamp", -1)]
@@ -222,7 +228,6 @@ def questionnaire():
         else:
             st.error("يرجى تعبئة جميع الإجابات.")
 
-# ----------------- Main Page Routing -----------------
 if st.session_state.page == "questions":
     questionnaire()
 elif st.session_state.page == "result":
