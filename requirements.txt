@@ -1,0 +1,11 @@
+streamlit
+pymongo
+scikit-learn
+nltk
+sentence-transformers
+torch
+transformers
+joblib
+
+
+
